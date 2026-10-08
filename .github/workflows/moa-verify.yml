@@ -1,0 +1,234 @@
+# moa-verify CI — native + Python (ctypes) + WebAssembly cross-runner reproducibility.
+#
+# 三条独立证据：① native CTest ② Python ctypes 绑定 ③ 浏览器端 WASM 重算。
+# 全部对同一密封批得逐字节相同 canonical JSON；WASM 站点以 SHA-384 信任根 fail-closed 校验。
+name: moa-verify
+
+run-name: moa-verify - ${{ github.ref_name }}
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'web/**'
+      - 'python/**'
+      - 'data/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/moa-verify.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'web/**'
+      - 'python/**'
+      - 'data/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/moa-verify.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  EMSCRIPTEN_VERSION: "6.0.3"
+
+jobs:
+  # ── ① 原生 CTest + ② Python ctypes 绑定（含 wheel 分发产物）─────────────
+  native-python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure + build (native + shared lib)
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+
+      - name: CTest (native ground truth)
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest
+        run: pip install pytest==8.3.*
+
+      - name: Python binding tests (ctypes over libmoa_verify.so)
+        env:
+          MOA_VERIFY_LIB: ${{ github.workspace }}/build/libmoa_verify.so
+          PYTHONPATH: ${{ github.workspace }}/python
+        run: python -m pytest python/tests/test_moa_verify.py -q
+
+      - name: Build wheel (bundled shared lib) + integrity manifest
+        run: |
+          set -euo pipefail
+          mkdir -p python/moa_verify/_lib
+          cp build/libmoa_verify.so python/moa_verify/_lib/
+          pip install build
+          python -m build python --wheel --outdir dist
+          python3 - <<'PY'
+          import glob, hashlib, json, zipfile
+          whl = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          if not any(n.endswith("_lib/libmoa_verify.so") for n in names):
+              raise SystemExit("wheel is missing the bundled shared library")
+          h = hashlib.sha256(open(whl, "rb").read()).hexdigest()
+          json.dump({"wheel": whl.split("/")[-1], "sha256": h},
+                    open("dist/wheel-integrity.json", "w"), indent=2)
+          print("wheel OK:", whl, h)
+          PY
+
+      - name: Upload wheel artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: moa-verify-wheel
+          path: |
+            dist/*.whl
+            dist/wheel-integrity.json
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ── ③ WebAssembly：构建 → node smoke → 指纹注入 → 浏览器 smoke ───────────
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Cache Emscripten SDK
+        uses: actions/cache@v4
+        with:
+          path: /tmp/emsdk-cache
+          key: emsdk-${{ env.EMSCRIPTEN_VERSION }}-${{ runner.os }}
+
+      - name: Setup Emscripten SDK
+        run: |
+          set -euo pipefail
+          if [ -d /tmp/emsdk-cache/emsdk ]; then
+            cp -r /tmp/emsdk-cache/emsdk ./emsdk
+          else
+            git clone https://github.com/emscripten-core/emsdk.git --depth 1 --branch ${{ env.EMSCRIPTEN_VERSION }}
+            ./emsdk/emsdk install ${{ env.EMSCRIPTEN_VERSION }}
+            mkdir -p /tmp/emsdk-cache && cp -r ./emsdk /tmp/emsdk-cache/emsdk
+          fi
+          ./emsdk/emsdk activate ${{ env.EMSCRIPTEN_VERSION }}
+          EMSDK_ABS="${GITHUB_WORKSPACE}/emsdk"
+          echo "${EMSDK_ABS}" >> "$GITHUB_PATH"
+          echo "${EMSDK_ABS}/upstream/emscripten" >> "$GITHUB_PATH"
+          echo "EMSDK=${EMSDK_ABS}" >> "$GITHUB_ENV"
+          echo "EM_CONFIG=${EMSDK_ABS}/.emscripten" >> "$GITHUB_ENV"
+
+      - name: Configure + build WASM
+        run: |
+          set -euo pipefail
+          emcmake cmake -S . -B build-wasm -DCMAKE_BUILD_TYPE=Release
+          emmake cmake --build build-wasm --parallel
+
+      - name: Verify site artifacts
+        run: |
+          set -euo pipefail
+          test -f build-wasm/site/moa_verify.js
+          test -f build-wasm/site/moa_verify.wasm
+          test -f build-wasm/site/index.html
+          test -f build-wasm/site/moa_batch.csv
+          ls -la build-wasm/site
+
+      - name: Inject SHA-384 fingerprints (CI loopback, fail-closed)
+        # 顺序：__WASM_FP__ / __INPUT_FP__ 先于 __FP__（前二者不含独立子串 __FP__）。
+        # 残留占位符 = 形态漂移 → fail-closed；内嵌信任根须 == 产物 SHA-384。
+        run: |
+          set -euo pipefail
+          SITE=build-wasm/site
+          WASM_FP="$(sha384sum "${SITE}/moa_verify.wasm" | cut -d' ' -f1)"
+          INPUT_FP="$(sha384sum "${SITE}/moa_batch.csv" | cut -d' ' -f1)"
+          ENTRY_FP="$(sha384sum "${SITE}/moa_verify.js" | cut -d' ' -f1)"
+          sed -i "s/__WASM_FP__/${WASM_FP}/g" "${SITE}/index.html"
+          sed -i "s/__INPUT_FP__/${INPUT_FP}/g" "${SITE}/index.html"
+          sed -i "s/__FP__/${ENTRY_FP}/g" "${SITE}/index.html"
+          if grep -aqE '__WASM_FP__|__INPUT_FP__|__FP__' "${SITE}/index.html"; then
+            echo "FAIL: leftover placeholder in ${SITE}/index.html (源码占位符形态漂移?)" >&2
+            exit 1
+          fi
+          META="$(sed -n 's/.*name="moa-wasm-fp" content="\([0-9a-f]\{96\}\)".*/\1/p' "${SITE}/index.html" | head -n1)"
+          [ -n "${META}" ] || { echo "FAIL: moa-wasm-fp meta 缺失或非 SHA-384 形态" >&2; exit 1; }
+          [ "${META}" = "${WASM_FP}" ] || { echo "FAIL: 信任根 != wasm 产物 SHA-384" >&2; exit 1; }
+          printf '{"moa_verify.wasm":"%s","moa_batch.csv":"%s","moa_verify.js":"%s","algorithm":"sha384"}\n' \
+            "${WASM_FP}" "${INPUT_FP}" "${ENTRY_FP}" > "${SITE}/wasm-fingerprint.json"
+          cat "${SITE}/wasm-fingerprint.json"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Node smoke test (WASM recompute == reference; tamper detected)
+        run: node tests/wasm_smoke_test.mjs build-wasm/site data/moa_batch.csv
+
+      - name: Install playwright (chromium)
+        run: |
+          set -euo pipefail
+          npm install --no-save --ignore-scripts playwright@1.62.0
+          npx playwright install --with-deps chromium
+
+      - name: Browser smoke test (fingerprints verified + bytes reproduced)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m http.server 4173 --directory build-wasm/site > http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill ${SERVER_PID} 2>/dev/null || true' EXIT
+          for i in $(seq 1 20); do
+            curl -fsS http://127.0.0.1:4173/index.html >/dev/null && break
+            sleep 1
+          done
+          node tests/browser_smoke_test.mjs http://127.0.0.1:4173
+
+      - name: Upload WASM site on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: moa-verify-site-debug
+          path: |
+            build-wasm/site
+            http.log
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload WASM site
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: moa-verify-site
+          path: build-wasm/site
+          if-no-files-found: error
+
+  # ── 供应链门禁（workflow 是 CI/CD 源代码）────────────────────────────
+  security-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install zizmor
+        run: pip install zizmor
+      - name: Audit workflows
+        run: zizmor --format plain --min-severity high .github/workflows/

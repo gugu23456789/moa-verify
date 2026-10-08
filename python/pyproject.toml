@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moa-verify"
+version = "0.1.0"
+description = "Independent recompute of the MoA sealed-batch aggregate (C++/WASM/Python, byte-identical)"
+requires-python = ">=3.8"
+license = { text = "MulanPSL-2.0" }
+authors = [{ name = "PuJunhan" }]
+keywords = ["reproducibility", "audit", "mixture-of-agents", "wasm"]
+classifiers = [
+  "License :: OSI Approved :: Mulan PSL v2",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C++",
+]
+
+[project.urls]
+Homepage = "https://github.com/gugu23456789/arxiv-zero-trust-hl-harness"
+
+[tool.setuptools]
+packages = ["moa_verify"]
+
+# 预编译共享库随 wheel 分发（CI 在构建 wheel 前把 libmoa_verify.* 拷进 moa_verify/_lib/）。
+[tool.setuptools.package-data]
+moa_verify = ["_lib/*"]

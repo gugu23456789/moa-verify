@@ -1,0 +1,41 @@
+== Aggregation: sealed batch ==
+batch arms           : 6
+per-criterion mean/min/max:
+  scope        63.17  [45, 78]
+  evidence     69.00  [62, 78]
+  assumptions  45.33  [25, 62]
+  recovery     39.83  [28, 58]
+  references   68.33  [55, 82]
+  bias         62.17  [45, 82]
+  cost         51.83  [40, 74]
+batch mean (F1-F7)   : 57.10
+top-verdict consensus: not_landable  6/6 = 1.00
+R(a) recall curve (m=6, k=6 detecting):
+  a=1  R=1.0000
+  a=2  R=1.0000
+  a=3  R=1.0000
+  a=4  R=1.0000
+  a=5  R=1.0000
+  a=6  R=1.0000
+
+== Contamination coefficients: kappa ledger ==
+batches / injections : 11 / 24
+kappa_cap  mean/pooled: 0.8864 / 0.8333
+kappa_tilt mean/pooled: 0.1136 / 0.1667
+zero-tilt batches    : 9/11
+per-batch (kappa_cap, kappa_tilt, tilt_total, discount 1-tilt_total):
+  R5                   1.0000  0.0000  0.0  1.0
+  R6                   1.0000  0.0000  0.0  1.0
+  R8-suba-ctx          1.0000  0.0000  0.0  1.0
+  suba-ctx-degraded    0.5000  0.5000  0.5  0.5
+  12arm-1of4           0.2500  0.7500  0.75  0.25
+  09-26-rc1            1.0000  0.0000  0.0  1.0
+  09-28-state-single   1.0000  0.0000  0.0  1.0
+  09-21-xenv-form      1.0000  0.0000  0.0  1.0
+  10-01-zh2-6arm       1.0000  0.0000  0.0  1.0
+  10-02-hook-boundary  1.0000  0.0000  0.0  1.0
+  10-04-satellite      1.0000  0.0000  0.0  1.0
+p_tilt (log-log OLS) : [UNFITTED]  reason=ZERO_INFLATED_INSUFFICIENT_NONZERO
+NOTE: the sealed batch above (1f25e48e17f0) is NOT in the ledger, so its
+      tilt is unobservable from the shipped data; its aggregate is reported
+      undiscounted rather than assumed clean (purity is relative).

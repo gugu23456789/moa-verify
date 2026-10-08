@@ -1,0 +1,16 @@
+# build outputs
+/build/
+/build-wasm/
+/dist/
+/node_modules/
+/emsdk/
+
+# staged native shared library (copied in before wheel build)
+python/moa_verify/_lib/
+
+# runtime logs
+http.log
+
+# python
+__pycache__/
+*.pyc

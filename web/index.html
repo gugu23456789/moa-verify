@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 信任根：加载前逐字节校验（CI 注入为产物 SHA-384；保留占位符则视为开发态） -->
+<meta name="moa-wasm-fp" content="__WASM_FP__">
+<meta name="moa-input-fp" content="__INPUT_FP__">
+<title>moa-verify — independent recompute of the MoA sealed batch</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+         margin: 2rem auto; max-width: 60rem; padding: 0 1rem; }
+  h1 { font-size: 1.15rem; }
+  #status { padding: .6rem .8rem; border-radius: .4rem; background: #8881; margin: 1rem 0; white-space: pre-wrap; }
+  pre { padding: .8rem; border-radius: .4rem; background: #8881; overflow-x: auto; }
+  .ok { color: #1a7f37; } .bad { color: #cf222e; } .warn { color: #9a6700; }
+  small { opacity: .7; }
+</style>
+</head>
+<body>
+<h1>moa-verify</h1>
+<p>Independently recompute the sealed mixture-of-agents batch aggregate, in-browser,
+from a <code>SHA-384</code>-verified WASM core and a <code>SHA-384</code>-verified sealed input.
+Same numbers as the paper table — byte-for-byte.</p>
+<div id="status">loading…</div>
+<pre id="result"></pre>
+<small id="detail"></small>
+
+<!-- WASM glue（MODULARIZE 工厂，定义全局 createMoaVerifyModule）；?v= 内容寻址防旧缓存 -->
+<script src="moa_verify.js?v=__FP__"></script>
+<script>
+// 参考 canonical JSON（论文表格的规范形态；与 native / Python 逐字节相同）。
+const EXPECTED_CANONICAL_JSON =
+  '{"arms":6,"per":{' +
+  '"scope":{"mean":63.17,"min":45,"max":78},' +
+  '"evidence":{"mean":69.00,"min":62,"max":78},' +
+  '"assumptions":{"mean":45.33,"min":25,"max":62},' +
+  '"recovery":{"mean":39.83,"min":28,"max":58},' +
+  '"references":{"mean":68.33,"min":55,"max":82},' +
+  '"bias":{"mean":62.17,"min":45,"max":82},' +
+  '"cost":{"mean":51.83,"min":40,"max":74}},' +
+  '"batch_mean":57.10,"consensus":{"not_landable":6}}';
+
+const HEX384 = /^[0-9a-f]{96}$/;          // 信任根存在性判定（占位符 __WASM_FP__ 不匹配）
+const statusEl = document.getElementById('status');
+const resultEl = document.getElementById('result');
+const detailEl = document.getElementById('detail');
+
+function setVerdict(v) { window.__moaVerdict = v; }
+function say(msg, cls) { statusEl.textContent = msg; statusEl.className = cls || ''; }
+
+function readMeta(name) {
+  const el = document.querySelector('meta[name="' + name + '"]');
+  return el ? el.getAttribute('content') : null;
+}
+
+async function sha384Hex(bytes) {
+  if (!globalThis.crypto || !crypto.subtle) throw new Error('sha384_unavailable');
+  const d = await crypto.subtle.digest('SHA-384', bytes);
+  return Array.from(new Uint8Array(d), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function fetchBytes(url) {
+  const r = await fetch(url, { cache: 'no-store' });   // 绕过 HTTP 缓存
+  if (!r.ok) throw new Error('fetch ' + r.status + ' ' + url);
+  return new Uint8Array(await r.arrayBuffer());
+}
+
+(async () => {
+  const wasmFp = readMeta('moa-wasm-fp');
+  const inputFp = readMeta('moa-input-fp');
+  const enforceWasm = !!wasmFp && HEX384.test(wasmFp);
+  const enforceInput = !!inputFp && HEX384.test(inputFp);
+
+  // 1) 取 WASM 字节（no-store）。信任根存在却取不到 → fail-closed 拒绝。
+  let wasmBytes;
+  try {
+    wasmBytes = await fetchBytes('moa_verify.wasm');
+  } catch (e) {
+    if (enforceWasm) { setVerdict({ ok:false, reason:'probe_fetch_failed', error:String(e) });
+                       return say('REFUSED: wasm fetch failed while trust root present\n' + e, 'bad'); }
+    setVerdict({ ok:false, reason:'probe_fetch_failed_dev', error:String(e) });
+    return say('ERROR: ' + e, 'bad');
+  }
+
+  // 2) WASM 指纹校验（fail-closed 三态：取不到/算法不可用/不匹配 → 拒绝）
+  if (enforceWasm) {
+    let actual;
+    try { actual = await sha384Hex(wasmBytes); }
+    catch (e) { setVerdict({ ok:false, reason:'sha384_unavailable', error:String(e) });
+                return say('REFUSED: SHA-384 unavailable (需要 HTTPS / localhost 安全上下文)', 'bad'); }
+    if (actual !== wasmFp) {
+      setVerdict({ ok:false, reason:'wasm_fingerprint_mismatch', expected:wasmFp, actual });
+      return say('REFUSED: wasm fingerprint mismatch\n  expected ' + wasmFp + '\n  actual   ' + actual, 'bad');
+    }
+    detailEl.textContent = 'wasm SHA-384 ' + actual.slice(0, 16) + '… verified';
+  } else {
+    say('dev mode: wasm trust root absent — running UNVERIFIED wasm', 'warn');
+  }
+
+  // 3) 实例化（字节直传，消除 glue 二次 fetch）
+  const Module = await createMoaVerifyModule({ wasmBinary: wasmBytes });
+
+  // 4) 取密封输入 + 指纹校验
+  let csvBytes;
+  try { csvBytes = await fetchBytes('moa_batch.csv'); }
+  catch (e) { setVerdict({ ok:false, reason:'input_fetch_failed', error:String(e) });
+              return say('ERROR: sealed input fetch failed\n' + e, 'bad'); }
+  if (enforceInput) {
+    const actual = await sha384Hex(csvBytes);
+    if (actual !== inputFp) {
+      setVerdict({ ok:false, reason:'input_fingerprint_mismatch', expected:inputFp, actual });
+      return say('REFUSED: sealed input fingerprint mismatch\n  expected ' + inputFp +
+                 '\n  actual   ' + actual, 'bad');
+    }
+    detailEl.textContent += '  |  input SHA-384 ' + actual.slice(0, 16) + '… verified';
+  }
+
+  // 5) 浏览器端独立重算 + 逐字节比对
+  const actual = Module.verifyCsv(new TextDecoder().decode(csvBytes));
+  resultEl.textContent = actual;
+  const ok = actual === EXPECTED_CANONICAL_JSON;
+  setVerdict({ ok, reason: ok ? 'verified' : 'mismatch', expected: EXPECTED_CANONICAL_JSON, actual });
+  say(ok ? 'VERIFIED: browser recompute bytes == published reference'
+         : 'MISMATCH: browser recompute differs from published reference', ok ? 'ok' : 'bad');
+})().catch(e => {
+  setVerdict({ ok:false, reason:'uncaught', error:String(e) });
+  say('ERROR: ' + e, 'bad');
+});
+</script>
+</body>
+</html>
