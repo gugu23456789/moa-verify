@@ -2,6 +2,7 @@
 #
 # 三条独立证据：① native CTest ② Python ctypes 绑定 ③ 浏览器端 WASM 重算。
 # 全部对同一密封批得逐字节相同 canonical JSON；WASM 站点以 SHA-384 信任根 fail-closed 校验。
+# 所有 actions 均按 commit SHA 固定（zizmor unpinned-uses 门禁）。
 name: moa-verify
 
 run-name: moa-verify - ${{ github.ref_name }}
@@ -37,6 +38,7 @@ concurrency:
 
 env:
   EMSCRIPTEN_VERSION: "6.0.3"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   # ── ① 原生 CTest + ② Python ctypes 绑定（含 wheel 分发产物）─────────────
@@ -45,7 +47,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
@@ -59,7 +61,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.11'
 
@@ -93,7 +95,7 @@ jobs:
 
       - name: Upload wheel artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: moa-verify-wheel
           path: |
@@ -108,12 +110,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
       - name: Cache Emscripten SDK
-        uses: actions/cache@v4
+        uses: actions/cache@8b402f58fbc84540c8b491a91e594a4576fec3d7 # v5.0.3
         with:
           path: /tmp/emsdk-cache
           key: emsdk-${{ env.EMSCRIPTEN_VERSION }}-${{ runner.os }}
@@ -174,7 +176,7 @@ jobs:
           cat "${SITE}/wasm-fingerprint.json"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: '22'
 
@@ -202,7 +204,7 @@ jobs:
 
       - name: Upload WASM site on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: moa-verify-site-debug
           path: |
@@ -213,7 +215,7 @@ jobs:
 
       - name: Upload WASM site
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: moa-verify-site
           path: build-wasm/site
@@ -225,7 +227,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - name: Install zizmor
